@@ -128,7 +128,7 @@ fn into_box_response(resp: Response<Incoming>) -> Response<BoxBody> {
 /// request must carry its own PP2 header with the correct client IP.
 async fn forward_with_pp2(
     dns_body: Bytes,
-    proxy_headers: hyper::HeaderMap,
+    req_headers: &hyper::HeaderMap,
     client_ip: IpAddr,
     upstream_url: &str,
     tls_config: Arc<rustls::ClientConfig>,
@@ -152,8 +152,19 @@ async fn forward_with_pp2(
             .uri(&path)
             .header("Host", &host)
             .header("Content-Type", "application/dns-message");
-        for (name, value) in &proxy_headers {
-            builder = builder.header(name.clone(), value.clone());
+
+        let mut has_xff = false;
+        for (name, value) in req_headers {
+            let n = name.as_str();
+            if n.starts_with("cf-") || n.starts_with("x-") || n == "forwarded" || n == "via" {
+                if n == "x-forwarded-for" {
+                    has_xff = true;
+                }
+                builder = builder.header(name.clone(), value.clone());
+            }
+        }
+        if !has_xff {
+            builder = builder.header("x-forwarded-for", client_ip.to_string());
         }
         builder.body(Full::new(dns_body))?
     };
@@ -251,26 +262,6 @@ async fn handle(
         }
     };
 
-    // ── Collect proxy headers to forward (cf-*, x-*, forwarded, via) ─────────
-    let mut proxy_headers = hyper::HeaderMap::new();
-    for (name, value) in req.headers() {
-        let n = name.as_str();
-        if n.get(..3).map(|s| s.eq_ignore_ascii_case("cf-")).unwrap_or(false)
-            || n.get(..2).map(|s| s.eq_ignore_ascii_case("x-")).unwrap_or(false)
-            || n.eq_ignore_ascii_case("forwarded")
-            || n.eq_ignore_ascii_case("via")
-        {
-            proxy_headers.insert(name.clone(), value.clone());
-        }
-    }
-
-    // Fallback: if no X-Forwarded-For arrived, synthesise one from the TCP peer
-    if !proxy_headers.contains_key("x-forwarded-for") {
-        if let Ok(v) = remote_addr.ip().to_string().parse() {
-            proxy_headers.insert("x-forwarded-for", v);
-        }
-    }
-
     // ── Real client IP for the PP2 header ─────────────────────────────────────
     let client_ip = real_client_ip(&req, remote_addr);
 
@@ -279,7 +270,7 @@ async fn handle(
         Duration::from_secs(5),
         forward_with_pp2(
             body_bytes,
-            proxy_headers,
+            req.headers(),
             client_ip,
             &upstream_url,
             tls_config,
