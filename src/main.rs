@@ -21,6 +21,7 @@ async fn handle(
             Full<Bytes>,
         >,
     >,
+    remote_addr: SocketAddr,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let upstream = env::var("NUMA_URL").unwrap_or_default();
 
@@ -53,10 +54,18 @@ async fn handle(
         }
     };
 
-    let upstream_req = Request::post(&upstream)
+    let mut upstream_req = Request::post(&upstream)
         .header("Content-Type", "application/dns-message")
+        .header("X-Forwarded-For", remote_addr.ip().to_string())
         .body(Full::new(Bytes::from(body_bytes)))
         .unwrap();
+
+    // Copy other relevant headers if needed, or just forward X-Real-IP
+    if let Some(real_ip) = req.headers().get("X-Real-IP") {
+        upstream_req
+            .headers_mut()
+            .insert("X-Real-IP", real_ip.clone());
+    }
 
     match client.request(upstream_req).await {
         Ok(upstream_resp) => {
@@ -150,13 +159,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = Arc::new(Client::builder(TokioExecutor::new()).build(https));
 
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, remote_addr) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let client = client.clone();
 
         tokio::task::spawn(async move {
             if let Err(err) = auto::Builder::new(TokioExecutor::new())
-                .serve_connection(io, service_fn(move |req| handle(req, client.clone())))
+                .serve_connection(
+                    io,
+                    service_fn(move |req| handle(req, client.clone(), remote_addr)),
+                )
                 .await
             {
                 eprintln!("Error serving connection: {:?}", err);
