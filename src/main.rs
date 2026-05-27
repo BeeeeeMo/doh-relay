@@ -21,49 +21,52 @@ type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 
 // ─── PROXY Protocol v2 ───────────────────────────────────────────────────────
 
-/// Build a PROXY Protocol v2 binary header.
+/// Write a PROXY Protocol v2 binary header into the provided stack buffer.
 ///
 /// `client_ip`   – the real end-user IP to advertise to the upstream.
 /// `server_addr` – the SocketAddr we connected to (from `TcpStream::peer_addr`).
+/// `buf`         – a mutable stack buffer (must be at least 52 bytes).
 ///
+/// Returns the number of bytes written to the buffer.
 /// The header is written onto the raw TCP socket **before** the TLS handshake,
 /// so the upstream server sees the real client IP at the L4 layer.
-fn build_pp2(client_ip: IpAddr, server_addr: SocketAddr) -> Vec<u8> {
+fn write_pp2(client_ip: IpAddr, server_addr: SocketAddr, buf: &mut [u8; 52]) -> usize {
     const SIG: [u8; 12] = [
         0x0d, 0x0a, 0x0d, 0x0a, 0x00, 0x0d, 0x0a,
         0x51, 0x55, 0x49, 0x54, 0x0a,
     ];
-    let mut h = Vec::with_capacity(52);
-    h.extend_from_slice(&SIG);
+    buf[..12].copy_from_slice(&SIG);
 
     match (client_ip, server_addr.ip()) {
         (IpAddr::V4(src), IpAddr::V4(dst)) => {
-            h.push(0x21); // version=2, command=PROXY
-            h.push(0x11); // TCP/IPv4
-            h.extend_from_slice(&12u16.to_be_bytes()); // address block length
-            h.extend_from_slice(&src.octets()); // src (real client)
-            h.extend_from_slice(&dst.octets()); // dst (Numa)
-            h.extend_from_slice(&0u16.to_be_bytes()); // src port (arbitrary)
-            h.extend_from_slice(&server_addr.port().to_be_bytes()); // dst port
+            buf[12] = 0x21; // version=2, command=PROXY
+            buf[13] = 0x11; // TCP/IPv4
+            buf[14..16].copy_from_slice(&12u16.to_be_bytes()); // address block length
+            buf[16..20].copy_from_slice(&src.octets()); // src (real client)
+            buf[20..24].copy_from_slice(&dst.octets()); // dst (Numa)
+            buf[24..26].copy_from_slice(&0u16.to_be_bytes()); // src port (arbitrary)
+            buf[26..28].copy_from_slice(&server_addr.port().to_be_bytes()); // dst port
+            28
         }
         (IpAddr::V6(src), IpAddr::V6(dst)) => {
-            h.push(0x21); // version=2, command=PROXY
-            h.push(0x21); // TCP/IPv6
-            h.extend_from_slice(&36u16.to_be_bytes());
-            h.extend_from_slice(&src.octets());
-            h.extend_from_slice(&dst.octets());
-            h.extend_from_slice(&0u16.to_be_bytes());
-            h.extend_from_slice(&server_addr.port().to_be_bytes());
+            buf[12] = 0x21; // version=2, command=PROXY
+            buf[13] = 0x21; // TCP/IPv6
+            buf[14..16].copy_from_slice(&36u16.to_be_bytes());
+            buf[16..32].copy_from_slice(&src.octets());
+            buf[32..48].copy_from_slice(&dst.octets());
+            buf[48..50].copy_from_slice(&0u16.to_be_bytes());
+            buf[50..52].copy_from_slice(&server_addr.port().to_be_bytes());
+            52
         }
         _ => {
             // Mixed AF (v4 client → v6 server or vice-versa).
             // Send LOCAL command; upstream falls back to the TCP peer address.
-            h.push(0x20); // version=2, command=LOCAL
-            h.push(0x00);
-            h.extend_from_slice(&0u16.to_be_bytes()); // no address block
+            buf[12] = 0x20; // version=2, command=LOCAL
+            buf[13] = 0x00;
+            buf[14..16].copy_from_slice(&0u16.to_be_bytes()); // no address block
+            16
         }
     }
-    h
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -163,7 +166,9 @@ async fn forward_with_pp2(
         // ── Write PP2 header BEFORE TLS ──────────────────────────────────────
         // Numa's accept loop reads it from the raw TCP stream, then calls
         // TlsAcceptor::accept — so the ordering must be PP2 → TLS ClientHello.
-        tcp.write_all(&build_pp2(client_ip, peer_addr)).await?;
+        let mut pp2_buf = [0u8; 52];
+        let len = write_pp2(client_ip, peer_addr, &mut pp2_buf);
+        tcp.write_all(&pp2_buf[..len]).await?;
 
         // ── TLS handshake ─────────────────────────────────────────────────────
         let connector = TlsConnector::from(tls_config);
