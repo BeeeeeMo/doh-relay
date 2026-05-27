@@ -34,12 +34,14 @@ The binary will be available at `target/release/doh-relay`.
 ### Environment Variables
 
 - `NUMA_URL`: The URL of the upstream DoH server. (Default: empty string, please set this before running).
+- `DEBUG`: Set to `true` to enable detailed access logging (client IP, request method, URI, and headers). (Default: `false`).
 
 ### Running the Relay
 
 ```bash
-# Set the upstream URL
+# Set the upstream URL and enable debug logging
 export NUMA_URL="https://dns.google/dns-query"
+export DEBUG="true"
 
 # Run the relay
 cargo run
@@ -71,8 +73,8 @@ services:
     ports:
       - "5381:5381"
     environment:
-      # Replace with your actual Numa node URL
       - NUMA_URL=https://your-numa-node.local/dns-query
+      - DEBUG=true
     restart: unless-stopped
 ```
 
