@@ -57,32 +57,66 @@ You can test the relay using `curl`. A DNS query for `google.com` (Type A) encod
 curl "http://127.0.0.1:5381/?dns=q80BAAABAAAAAAAAA3d3dwdnb29nbGUDY29tAAABAAE"
 ```
 
-## Configuration Note
+## Real Client IP Preservation (PROXY Protocol v2)
 
-This relay currently skips TLS certificate verification for the upstream server. This is intended for specific use cases (like mirroring certain Python relay behaviors) and should be used with caution in public production environments.
+Since Numa's internal DNS-over-HTTPS (DoH) engine processes client IP addresses purely at the L4 connection layer (completely ignoring HTTP headers like `X-Forwarded-For` or `X-Real-IP`), **PROXY Protocol v2 is required** for Numa to see the original client IP in its query logs and ad-blocking controls.
+
+This relay automatically prepends the PROXY Protocol v2 binary header to the upstream TLS connection. 
+
+### 1. Configure Numa (`numa.toml`)
+You must enable PROXY Protocol in your `numa.toml` configuration on the Numa server. Add the following block, making sure to trust the IP ranges corresponding to your Docker container networks (typically `172.16.0.0/12`):
+
+```toml
+[proxy.proxy_protocol]
+# Trust Docker's private bridge networks to send the PROXY header
+from = ["127.0.0.1", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]
+header_timeout_ms = 5000
+```
+
+### 2. TLS Certification Note
+This relay intentionally skips TLS certificate verification for the upstream server. This is designed to facilitate secure, local inter-container communication without requiring strict, public CA verification for internal hostnames like `https://numa/...`.
+
+---
 
 ## Docker Compose
 
-You can easily run the relay using Docker Compose. Create a `docker-compose.yml` file:
+The recommended way to deploy both `doh-relay` and `numa` together is using Docker Compose. Create a `docker-compose.yml` file and mount your custom `numa.toml` configuration:
 
 ```yaml
 services:
+  numa:
+    image: ghcr.io/razvandimescu/numa
+    container_name: numa
+    restart: unless-stopped
+    ports:
+      - "53:53"
+      - "53:53/udp"
+      - "5380:5380"
+    volumes:
+      # Bind mount your custom numa.toml configuration file
+      - ./numa.toml:/root/.config/numa/numa.toml
+
   doh-relay:
     image: ghcr.io/beeeeemo/doh-relay:latest
     container_name: doh-relay
     ports:
       - "5381:5381"
     environment:
-      - NUMA_URL=https://your-numa-node.local/dns-query
+      - NUMA_URL=https://numa/dns-query
       - DEBUG=true
     restart: unless-stopped
+
+networks:
+  default:
+    external: true
+    name: ferron_net
 ```
 
-Then run:
+Then deploy the services:
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details (if applicable).
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
