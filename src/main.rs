@@ -1,4 +1,4 @@
-use base64::{Engine as _, engine::general_purpose::URL_SAFE};
+use base64::Engine as _;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -217,11 +217,10 @@ async fn forward_with_pp2(
 async fn handle(
     req: Request<Incoming>,
     tls_config: Arc<rustls::ClientConfig>,
+    upstream_url: Arc<String>,
+    debug_mode: bool,
     remote_addr: SocketAddr,
 ) -> Result<Response<BoxBody>, hyper::Error> {
-    let upstream_url = env::var("NUMA_URL").unwrap_or_default();
-    let debug_mode = env::var("DEBUG").map(|v| v == "true").unwrap_or(false);
-
     if debug_mode {
         info!(
             "Access Log: {} -> {} {}",
@@ -242,7 +241,7 @@ async fn handle(
     });
 
     let dns_b64 = match dns_b64 {
-        Some(v) => v.to_string(),
+        Some(v) => v,
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
@@ -252,14 +251,21 @@ async fn handle(
     };
 
     // ── Decode base64url ──────────────────────────────────────────────────────
-    let padded = format!("{:=<width$}", dns_b64, width = (dns_b64.len() + 3) / 4 * 4);
-    let body_bytes = match URL_SAFE.decode(&padded) {
-        Ok(b) => Bytes::from(b),
-        Err(_) => {
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(full_body(Bytes::new()))
-                .unwrap());
+    // Dynamically select the engine based on padding to avoid any heap-allocated string padding!
+    let body_bytes = {
+        let decode_res = if dns_b64.contains('=') {
+            base64::engine::general_purpose::URL_SAFE.decode(dns_b64)
+        } else {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(dns_b64)
+        };
+        match decode_res {
+            Ok(b) => Bytes::from(b),
+            Err(_) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(full_body(Bytes::new()))
+                    .unwrap());
+            }
         }
     };
 
@@ -349,6 +355,9 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt::init();
 
+    let upstream_url = Arc::new(env::var("NUMA_URL").unwrap_or_default());
+    let debug_mode = env::var("DEBUG").map(|v| v == "true").unwrap_or(false);
+
     let addr: SocketAddr = ([0, 0, 0, 0], 5381).into();
     let listener = TcpListener::bind(addr).await?;
     info!("Listening on http://{}", addr);
@@ -379,12 +388,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 match accept_res {
                     Ok((stream, remote_addr)) => {
                         let tls_config = tls_config.clone();
+                        let upstream_url = upstream_url.clone();
                         tokio::task::spawn(async move {
                             if let Err(err) = auto::Builder::new(TokioExecutor::new())
                                 .serve_connection(
                                     TokioIo::new(stream),
                                     service_fn(move |req| {
-                                        handle(req, tls_config.clone(), remote_addr)
+                                        handle(
+                                            req,
+                                            tls_config.clone(),
+                                            upstream_url.clone(),
+                                            debug_mode,
+                                            remote_addr,
+                                        )
                                     }),
                                 )
                                 .await
