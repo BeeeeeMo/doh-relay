@@ -1,6 +1,8 @@
 # DoH Relay
 
-A lightweight DNS-over-HTTPS (DoH) relay server written in Rust. This tool listens for DNS queries over HTTP (via the `?dns=` query parameter) and forwards them to a designated upstream DoH server using the POST method.
+A lightweight DNS-over-HTTPS (DoH) relay server written in Rust. 
+
+**Motivation:** This tool was created specifically to solve compatibility issues with [Numa](https://github.com/razvandimescu/numa). Numa currently does not support processing DoH queries via HTTP `GET` requests. This relay bridges that gap by listening for HTTP `GET` DNS queries (via the `?dns=` query parameter), decoding them, and forwarding them to the Numa upstream server using the `POST` method.
 
 ## Features
 
@@ -56,6 +58,28 @@ curl "http://127.0.0.1:5381/?dns=q80BAAABAAAAAAAAA3d3dwdnb29nbGUDY29tAAABAAE"
 ## Configuration Note
 
 This relay currently skips TLS certificate verification for the upstream server. This is intended for specific use cases (like mirroring certain Python relay behaviors) and should be used with caution in public production environments.
+
+## Docker Compose
+
+You can easily run the relay using Docker Compose. Create a `docker-compose.yml` file:
+
+```yaml
+services:
+  doh-relay:
+    image: ghcr.io/beeeeemo/doh-relay:latest
+    container_name: doh-relay
+    ports:
+      - "5381:5381"
+    environment:
+      # Replace with your actual Numa node URL
+      - NUMA_URL=https://your-numa-node.local/dns-query
+    restart: unless-stopped
+```
+
+Then run:
+```bash
+docker-compose up -d
+```
 
 ## License
 
