@@ -73,14 +73,35 @@ async fn handle(
 
     let mut upstream_req = Request::post(&upstream)
         .header("Content-Type", "application/dns-message")
-        .header("X-Forwarded-For", remote_addr.ip().to_string())
         .body(Full::new(Bytes::from(body_bytes)))
         .unwrap();
 
-    if let Some(real_ip) = req.headers().get("X-Real-IP") {
-        upstream_req
-            .headers_mut()
-            .insert("X-Real-IP", real_ip.clone());
+    // Transparently forward identity-related headers
+    {
+        let headers = upstream_req.headers_mut();
+        for (name, value) in req.headers() {
+            let name_str = name.as_str();
+            if name_str
+                .get(..3)
+                .map(|s| s.eq_ignore_ascii_case("cf-"))
+                .unwrap_or(false)
+                || name_str
+                    .get(..2)
+                    .map(|s| s.eq_ignore_ascii_case("x-"))
+                    .unwrap_or(false)
+                || name_str.eq_ignore_ascii_case("forwarded")
+                || name_str.eq_ignore_ascii_case("via")
+            {
+                headers.insert(name.clone(), value.clone());
+            }
+        }
+
+        // Fallback: If X-Forwarded-For is missing, add the remote_addr
+        if !headers.contains_key("X-Forwarded-For") {
+            if let Ok(value) = remote_addr.ip().to_string().parse() {
+                headers.insert("X-Forwarded-For", value);
+            }
+        }
     }
 
     // Upstream request with 5-second timeout
