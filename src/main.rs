@@ -9,7 +9,11 @@ use hyper_util::server::conn::auto;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::signal;
+use tokio::time::timeout;
+use tracing::{error, info, warn};
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
 
@@ -27,14 +31,14 @@ async fn handle(
     let debug_mode = env::var("DEBUG").map(|v| v == "true").unwrap_or(false);
 
     if debug_mode {
-        println!(
-            ">>> Access Log: {} -> {} {}",
+        info!(
+            "Access Log: {} -> {} {}",
             remote_addr,
             req.method(),
             req.uri()
         );
         for (name, value) in req.headers() {
-            println!("  Header: {}: {:?}", name, value);
+            info!("  Header: {}: {:?}", name, value);
         }
     }
 
@@ -73,30 +77,50 @@ async fn handle(
         .body(Full::new(Bytes::from(body_bytes)))
         .unwrap();
 
-    // Copy other relevant headers if needed, or just forward X-Real-IP
     if let Some(real_ip) = req.headers().get("X-Real-IP") {
         upstream_req
             .headers_mut()
             .insert("X-Real-IP", real_ip.clone());
     }
 
-    match client.request(upstream_req).await {
-        Ok(upstream_resp) => {
+    // Upstream request with 5-second timeout
+    match timeout(Duration::from_secs(5), client.request(upstream_req)).await {
+        Ok(Ok(upstream_resp)) => {
             if debug_mode {
-                println!("<<< Upstream Response: {}", upstream_resp.status());
+                info!("Upstream Response: {}", upstream_resp.status());
             }
-            let data = upstream_resp.into_body().collect().await?.to_bytes();
-            Ok(Response::builder()
-                .status(StatusCode::OK)
-                .header("Content-Type", "application/dns-message")
-                .header("Content-Length", data.len())
-                .body(full_body(data))
-                .unwrap())
+
+            let (parts, body) = upstream_resp.into_parts();
+            let data_len = parts
+                .headers
+                .get("Content-Length")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.parse::<usize>().ok());
+
+            let mut builder = Response::builder()
+                .status(parts.status)
+                .header("Content-Type", "application/dns-message");
+
+            if let Some(len) = data_len {
+                builder = builder.header("Content-Length", len);
+            }
+
+            // Stream body back to client for memory efficiency
+            let streamed_body = body.map_err(|e| hyper::Error::from(e)).boxed();
+
+            Ok(builder.body(streamed_body).unwrap())
         }
-        Err(e) => {
-            eprintln!("upstream error: {e}");
+        Ok(Err(e)) => {
+            error!("upstream error: {e}");
             Ok(Response::builder()
                 .status(StatusCode::BAD_GATEWAY)
+                .body(full_body(Bytes::new()))
+                .unwrap())
+        }
+        Err(_) => {
+            warn!("upstream request timed out");
+            Ok(Response::builder()
+                .status(StatusCode::GATEWAY_TIMEOUT)
                 .body(full_body(Bytes::new()))
                 .unwrap())
         }
@@ -107,7 +131,6 @@ fn full_body(chunk: Bytes) -> BoxBody {
     Full::new(chunk).map_err(|never| match never {}).boxed()
 }
 
-// Skip TLS cert verification (mirrors Python's ssl._create_unverified_context)
 #[derive(Debug)]
 struct NoVerifier;
 impl rustls::client::danger::ServerCertVerifier for NoVerifier {
@@ -152,11 +175,13 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Initialize tracing
+    tracing_subscriber::fmt::init();
+
     let addr: SocketAddr = ([0, 0, 0, 0], 5381).into();
     let listener = TcpListener::bind(addr).await?;
-    println!("Listening on http://{}", addr);
+    info!("Listening on http://{}", addr);
 
-    // TLS config with ring crypto provider
     rustls::crypto::ring::default_provider()
         .install_default()
         .expect("failed to install rustls crypto provider");
@@ -174,21 +199,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let client = Arc::new(Client::builder(TokioExecutor::new()).build(https));
 
-    loop {
-        let (stream, remote_addr) = listener.accept().await?;
-        let io = TokioIo::new(stream);
-        let client = client.clone();
+    // Create a cancellation token or a way to signal shutdown
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
 
-        tokio::task::spawn(async move {
-            if let Err(err) = auto::Builder::new(TokioExecutor::new())
-                .serve_connection(
-                    io,
-                    service_fn(move |req| handle(req, client.clone(), remote_addr)),
-                )
-                .await
-            {
-                eprintln!("Error serving connection: {:?}", err);
+    // Spawn signal handler
+    tokio::spawn(async move {
+        signal::ctrl_c().await.expect("failed to listen for event");
+        info!("Shutdown signal received");
+        let _ = tx.send(()).await;
+    });
+
+    loop {
+        tokio::select! {
+            accept_res = listener.accept() => {
+                match accept_res {
+                    Ok((stream, remote_addr)) => {
+                        let io = TokioIo::new(stream);
+                        let client = client.clone();
+                        tokio::task::spawn(async move {
+                            if let Err(err) = auto::Builder::new(TokioExecutor::new())
+                                .serve_connection(io, service_fn(move |req| handle(req, client.clone(), remote_addr)))
+                                .await
+                            {
+                                error!("Error serving connection: {:?}", err);
+                            }
+                        });
+                    }
+                    Err(e) => error!("Accept error: {:?}", e),
+                }
             }
-        });
+            _ = rx.recv() => {
+                info!("Stopping server loop...");
+                break;
+            }
+        }
     }
+
+    info!("Server shut down gracefully");
+    Ok(())
 }

@@ -4,11 +4,21 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["full"] }
-hyper-rustls = { version = "0.27", features = ["http1"] }
-rustls = { version = "0.23", features = ["ring"] }
-tokio = { version = "1", features = ["full"] }
+# Hyper 1.0 with specific features
+hyper = { version = "1", features = ["http1", "client", "server"] }
+hyper-util = { version = "0.1", features = ["http1", "client-legacy", "server-auto", "tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "ring", "tls12"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "time", "signal"] }
 base64 = "0.22"
 http-body-util = "0.1"
 bytes = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = true
+strip = true
+codegen-units = 1
+opt-level = "z" # Optimize for size while maintaining high performance
+panic = "abort" # Reduce binary size by removing stack unwinding
