@@ -1,45 +1,46 @@
 # --- Stage 1: Builder ---
-FROM rust:1.85-slim-bookworm AS builder
+FROM rust:1.85-alpine AS builder
 
-# Install build dependencies for crates like ring / aws-lc-sys
-RUN apt-get update && apt-get install -y \
+# Install build dependencies for musl and crypto libraries
+RUN apk add --no-cache \
+    musl-dev \
+    gcc \
+    make \
     cmake \
     perl \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+    build-base \
+    ca-certificates
 
 WORKDIR /usr/src/doh-relay
 
-# Copy Cargo files first to cache dependencies
+# Add the musl target
+RUN rustup target add x86_64-unknown-linux-musl
+
+# Copy Cargo files and build dependencies to cache them
 COPY Cargo.toml Cargo.lock ./
-
-# Create a dummy main.rs to build dependencies only
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release
-RUN rm -f target/release/deps/doh_relay*
+RUN cargo build --release --target x86_64-unknown-linux-musl
+RUN rm -f target/x86_64-unknown-linux-musl/release/deps/doh_relay*
 
-# Copy the actual source code and build the application
+# Build the actual application
 COPY src ./src
-RUN cargo build --release
+RUN cargo build --release --target x86_64-unknown-linux-musl
 
-# --- Stage 2: Runtime ---
-FROM debian:bookworm-slim
+# --- Stage 2: Runtime (Scratch) ---
+FROM scratch
 
-# Install CA certificates (Required for HTTPS upstream connections)
-RUN apt-get update && apt-get install -y \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# Copy CA certificates for HTTPS support
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-WORKDIR /app
+# Copy the statically linked binary
+COPY --from=builder /usr/src/doh-relay/target/x86_64-unknown-linux-musl/release/doh-relay /doh-relay
 
-# Copy the binary from the builder stage
-COPY --from=builder /usr/src/doh-relay/target/release/doh-relay /app/doh-relay
-
-# Default environment variable
+# Default environment variables
 ENV NUMA_URL=""
+ENV DEBUG="false"
 
 # Expose the relay port
 EXPOSE 5381
 
 # Run the application
-CMD ["./doh-relay"]
+ENTRYPOINT ["/doh-relay"]

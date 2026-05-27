@@ -24,6 +24,19 @@ async fn handle(
     remote_addr: SocketAddr,
 ) -> Result<Response<BoxBody>, hyper::Error> {
     let upstream = env::var("NUMA_URL").unwrap_or_default();
+    let debug_mode = env::var("DEBUG").map(|v| v == "true").unwrap_or(false);
+
+    if debug_mode {
+        println!(
+            ">>> Access Log: {} -> {} {}",
+            remote_addr,
+            req.method(),
+            req.uri()
+        );
+        for (name, value) in req.headers() {
+            println!("  Header: {}: {:?}", name, value);
+        }
+    }
 
     // Parse ?dns= query param
     let dns_b64 = req.uri().query().and_then(|q| {
@@ -69,6 +82,9 @@ async fn handle(
 
     match client.request(upstream_req).await {
         Ok(upstream_resp) => {
+            if debug_mode {
+                println!("<<< Upstream Response: {}", upstream_resp.status());
+            }
             let data = upstream_resp.into_body().collect().await?.to_bytes();
             Ok(Response::builder()
                 .status(StatusCode::OK)
