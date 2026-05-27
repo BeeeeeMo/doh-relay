@@ -1,7 +1,8 @@
 # --- Stage 1: Builder ---
-FROM rust:1.85-alpine AS builder
+# 使用目標平台的原生 Rust Alpine 映像檔
+FROM --platform=$BUILDPLATFORM rust:1.85-alpine AS builder
 
-# Install build dependencies for musl and crypto libraries
+# 安裝編譯所需的工具
 RUN apk add --no-cache \
     musl-dev \
     gcc \
@@ -13,34 +14,31 @@ RUN apk add --no-cache \
 
 WORKDIR /usr/src/doh-relay
 
-# Add the musl target
-RUN rustup target add x86_64-unknown-linux-musl
-
-# Copy Cargo files and build dependencies to cache them
+# 1. 複製 Cargo 檔案以利用快取
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release --target x86_64-unknown-linux-musl
-RUN rm -f target/x86_64-unknown-linux-musl/release/deps/doh_relay*
 
-# Build the actual application
+# 2. 建立空專案並編譯依賴 (這部分會自動偵測架構)
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release
+RUN rm -f target/release/deps/doh_relay*
+
+# 3. 編譯實際的程式碼
 COPY src ./src
-RUN cargo build --release --target x86_64-unknown-linux-musl
+RUN cargo build --release
 
 # --- Stage 2: Runtime (Scratch) ---
 FROM scratch
 
-# Copy CA certificates for HTTPS support
+# 複製根憑證
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
-# Copy the statically linked binary
-COPY --from=builder /usr/src/doh-relay/target/x86_64-unknown-linux-musl/release/doh-relay /doh-relay
+# 從正確的路徑複製二進位檔 (不再有硬編碼的架構路徑)
+COPY --from=builder /usr/src/doh-relay/target/release/doh-relay /doh-relay
 
-# Default environment variables
+# 設定環境變數
 ENV NUMA_URL=""
 ENV DEBUG="false"
 
-# Expose the relay port
 EXPOSE 5381
 
-# Run the application
 ENTRYPOINT ["/doh-relay"]
