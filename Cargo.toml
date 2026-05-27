@@ -1,0 +1,14 @@
+[package]
+name = "doh-relay"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+hyper-rustls = { version = "0.27", features = ["http1"] }
+rustls = { version = "0.23", features = ["ring"] }
+tokio = { version = "1", features = ["full"] }
+base64 = "0.22"
+http-body-util = "0.1"
+bytes = "1"
