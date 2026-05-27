@@ -171,6 +171,7 @@ async fn forward_with_pp2(
 
     // ── TCP connect (async DNS resolution built in) ───────────────────────────
     let mut tcp = tokio::net::TcpStream::connect(format!("{}:{}", host, port)).await?;
+    tcp.set_nodelay(true)?;
     let peer_addr = tcp.peer_addr()?;
 
     if use_tls {
